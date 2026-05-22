@@ -106,8 +106,7 @@ rx_ui = ui_init(rx_ui);
 
 %% ================= 显示窗口 =================
 fig_main = figure('Name', '接收端 - 分块渐进式恢复', 'NumberTitle', 'off', ...
-    'Position', [100, 100, 900, 500]);
-colormap gray;
+    'Position', [50, 50, 1100, 650]);
 
 %% ================= SDR 初始化 =================
 disp('正在初始化 USRP 硬件，请稍候...');
@@ -407,24 +406,31 @@ end
 imshow(full_img);
 title(sprintf('图片恢复: %d/%d 块', sum(img_received(:)), grid_rows*grid_cols), 'FontSize', 12);
 
-% 右侧：视频帧缩略图条
+% 右侧：视频帧缩略图网格 (4行×5列)
 subplot(1, 2, 2);
-vid_img = zeros(120, 160 * video_frame_count, 3, 'uint8');
+vid_cols = 5;
+vid_rows = ceil(video_frame_count / vid_cols);
+frame_w = 160;
+frame_h = 120;
+vid_img = zeros(frame_h * vid_rows, frame_w * vid_cols, 3, 'uint8');
 for f = 1:video_frame_count
-    x1 = (f-1)*160 + 1;
-    x2 = f*160;
+    r = ceil(f / vid_cols);
+    c = mod(f - 1, vid_cols) + 1;
+    y1 = (r-1)*frame_h + 1;
+    y2 = r*frame_h;
+    x1 = (c-1)*frame_w + 1;
+    x2 = c*frame_w;
     if video_received(f) && ~isempty(video_frame_data{f})
         try
             frame_img = imdecode(video_frame_data{f});
             if ~isempty(frame_img)
-                frame_img = imresize(frame_img, [120, 160]);
-                vid_img(:, x1:x2, :) = frame_img;
+                frame_img = imresize(frame_img, [frame_h, frame_w]);
+                vid_img(y1:y2, x1:x2, :) = frame_img;
             end
         catch
-            vid_img(:, x1:x2, :) = 128;
+            vid_img(y1:y2, x1:x2, :) = 128;
         end
     end
-    % 帧之间的分隔线（白色虚线效果通过不画实现，黑色区域即为未收到）
 end
 imshow(vid_img);
 title(sprintf('视频帧恢复: %d/%d 帧', sum(video_received(:)), video_frame_count), 'FontSize', 12);
