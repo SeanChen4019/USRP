@@ -66,8 +66,6 @@ fprintf('[RX-INIT] 预存图片和视频块数据...\n');
 
 [img_blocks, img_crc] = preprocess_image(img_path, IMAGE_GRID_ROWS, IMAGE_GRID_COLS);
 [info_h, info_w] = get_image_dims(img_path);
-img_block_h = floor(info_h / IMAGE_GRID_ROWS);
-img_block_w = floor(info_w / IMAGE_GRID_COLS);
 
 [video_blocks_data, video_crc] = preprocess_video(video_path, VIDEO_FRAME_NUM);
 
