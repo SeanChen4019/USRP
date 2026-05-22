@@ -1,9 +1,9 @@
-function [Trans_sig_data, tx_cache] = Data_trans_sig_Gen(Anti_Jamming_Mode_select_rec, payload_bytes, pkt_select, session_id)
-% 高速可靠传输版：将业务数据拆成很多 44B 物理包，并缓存每个包的独立波形
+function [Trans_sig_data, tx_cache] = Data_trans_sig_Gen(Anti_Jamming_Mode_select_rec, block_meta, pkt_select, session_id)
+% 分块渐进式传输版：将预处理的图像/视频块编码为独立物理包
 %
 % 输入：
 %   Anti_Jamming_Mode_select_rec : 0 常规QPSK；1 低速抗扰
-%   payload_bytes                : uint8 字节流（图片/文本均可）
+%   block_meta                   : struct数组，字段 row, col, total_rows, total_cols, crc32, type
 %   pkt_select                   : 需要拼接输出的包号列表，留空表示全部
 %   session_id                   : 会话号，默认 1
 %
@@ -44,28 +44,29 @@ else
     modulator.PhaseOffset = pi/4;
 end
 
-payload_bytes = uint8(payload_bytes(:));
+total_pkt_num = length(block_meta);
 payload_bytes_per_pkt = 44;
-total_pkt_num = max(1, ceil(length(payload_bytes) / payload_bytes_per_pkt));
-zero_padding_bytes = total_pkt_num * payload_bytes_per_pkt - length(payload_bytes);
-zero_padding_bits = zero_padding_bytes * 8;
+zero_padding_bits = 0;
 
 waveforms = cell(1, total_pkt_num);
 wave_lens = zeros(1, total_pkt_num);
 valid_bits_each = zeros(1, total_pkt_num);
 
 for pkt_id = 1:total_pkt_num
-    byte_st = (pkt_id - 1) * payload_bytes_per_pkt + 1;
-    byte_ed = min(pkt_id * payload_bytes_per_pkt, length(payload_bytes));
-    valid_bytes = max(0, byte_ed - byte_st + 1);
+    blk = block_meta(pkt_id);
 
+    % 包载荷：row(8bit) + col(8bit) + total_rows(8bit) + total_cols(8bit) + type(8bit) + crc32(32bit) + 保留
     payload_this = zeros(payload_bytes_per_pkt, 1, 'uint8');
-    if valid_bytes > 0
-        payload_this(1:valid_bytes) = payload_bytes(byte_st:byte_ed);
-    end
-    valid_bits_each(pkt_id) = valid_bytes * 8;
+    payload_this(1) = uint8(blk.row);
+    payload_this(2) = uint8(blk.col);
+    payload_this(3) = uint8(blk.total_rows);
+    payload_this(4) = uint8(blk.total_cols);
+    payload_this(5) = uint8(blk.type);
+    crc_bytes = typecast(uint32(blk.crc32), 'uint8');
+    payload_this(6:9) = crc_bytes(:);
 
     payload_bits = bytes_to_bits(payload_this);
+    valid_bits_each(pkt_id) = payload_bytes_per_pkt * 8;
 
     frame_bits = [ ...
         defs.frame_head; ...
@@ -74,11 +75,10 @@ for pkt_id = 1:total_pkt_num
         bits_from_int(session_id, 16); ...
         bits_from_int(total_pkt_num, 16); ...
         bits_from_int(pkt_id, 16); ...
-        bits_from_int(valid_bytes * 8, 16); ...
+        bits_from_int(payload_bytes_per_pkt * 8, 16); ...
         bits_from_int(zero_padding_bits, 9); ...
         payload_bits];
 
-    % 449 bit + CRC32 = 481 bit，再补 5bit 变成 486 bit
     coded_in = [crcgenerator(frame_bits); defs.data_frame_end];
 
     scr_bits = scramble_bits(coded_in, defs.scr_seq);
@@ -116,7 +116,7 @@ tx_cache.mode = Anti_Jamming_Mode_select_rec;
 tx_cache.waveforms = waveforms;
 tx_cache.wave_lens = wave_lens;
 tx_cache.valid_bits_each = valid_bits_each;
-tx_cache.payload_bytes = payload_bytes;
+tx_cache.block_meta = block_meta;
 
 if isempty(pkt_select)
     pkt_select = 1:total_pkt_num;

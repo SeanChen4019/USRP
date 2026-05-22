@@ -1,10 +1,10 @@
-% =========== 发射端：UDP广播主链路 + 原始参数反向链路复原版 + UI ===========
+% =========== 发射端：分块渐进式传输 + 空闲等待 + 固定轮次 ===========
 clear
 clc
 close all force
 warning('off', 'all');
 
-fprintf('\n==================== 发射端（UDP广播 + 原始参数反向链路）启动 ====================\n');
+fprintf('\n==================== 发射端（分块渐进式传输）启动 ====================\n');
 
 %% ================= 初始化 =================
 if exist('radio_tx', 'var') && isvalid(radio_tx)
@@ -17,15 +17,24 @@ if exist('radio_rx', 'var') && isvalid(radio_rx)
 end
 
 samp_rate = 200e6 / 512;
-BUS_SLOT_SAMPLES = 160000;   % 主链路数据发送槽
-FB_RX_SAMPLES    = 60000;    % 反向链路参数接收槽（按原始版本复原）
+BUS_SLOT_SAMPLES = 160000;
+FB_RX_SAMPLES    = 60000;
 
 BURST_PKTS    = 10;
 GUARD_PRE     = 8000;
 GUARD_BETWEEN = 1200;
 GUARD_POST    = 8000;
 
-STATE_BROADCAST = 1;
+% ---- 新增：固定轮次 + 空闲等待 ----
+NUM_ROUNDS       = 2;
+IDLE_SLOTS       = 3;
+IMAGE_GRID_ROWS  = 8;
+IMAGE_GRID_COLS  = 8;
+VIDEO_FRAME_NUM  = 20;
+
+STATE_SENDING = 1;
+STATE_IDLE    = 2;
+STATE_DONE    = 3;
 
 Carrier_set = 2e9 : 0.5e9 : 4e9;
 Power_set = 2e-1 : 1e-1 : 8e-1;
@@ -48,19 +57,55 @@ script_dir = fileparts(mfilename('fullpath'));
 if isempty(script_dir)
     script_dir = pwd;
 end
-img_file_name = fullfile(script_dir, '视频.mp4');
-payload_bytes = build_file_payload(img_file_name);
+
+%% ================= 预处理图片和视频为块 =================
+fprintf('[TX-INIT] 预处理图片和视频...\n');
+
+img_path = fullfile(script_dir, 'p2.jpg');
+[~, img_crc] = preprocess_image(img_path, IMAGE_GRID_ROWS, IMAGE_GRID_COLS);
+
+video_path = fullfile(script_dir, '视频.mp4');
+[~, video_crc] = preprocess_video(video_path, VIDEO_FRAME_NUM);
+
+% 合并所有块到一个列表
+block_meta = [];
+% 图片块: type=0
+for r = 1:IMAGE_GRID_ROWS
+    for c = 1:IMAGE_GRID_COLS
+        blk.row = r - 1;
+        blk.col = c - 1;
+        blk.total_rows = IMAGE_GRID_ROWS;
+        blk.total_cols = IMAGE_GRID_COLS;
+        blk.crc32 = img_crc(r, c);
+        blk.type = 0;
+        block_meta = [block_meta, blk];
+    end
+end
+% 视频帧块: type=1
+for f = 1:VIDEO_FRAME_NUM
+    blk.row = f - 1;
+    blk.col = 0;
+    blk.total_rows = VIDEO_FRAME_NUM;
+    blk.total_cols = 1;
+    blk.crc32 = video_crc(f);
+    blk.type = 1;
+    block_meta = [block_meta, blk];
+end
 
 session_id = 1;
-[~, tx_cache] = Data_trans_sig_Gen(Anti_Jamming_Mode, payload_bytes, [], session_id);
+[~, tx_cache] = Data_trans_sig_Gen(Anti_Jamming_Mode, block_meta, [], session_id);
 total_pkts = tx_cache.total_pkt_num;
 
-fprintf('[TX-INIT] session=%d | total_pkts=%d | CF=%.2f GHz | Gain=%d dB | Mode=%d\n', ...
-    session_id, total_pkts, CenterFrequency/1e9, Power_gain, Anti_Jamming_Mode);
+fprintf('[TX-INIT] session=%d | 总块数=%d (图片%dx%d=%d + 视频%d帧) | CF=%.2f GHz | Gain=%d dB\n', ...
+    session_id, total_pkts, IMAGE_GRID_ROWS, IMAGE_GRID_COLS, ...
+    IMAGE_GRID_ROWS*IMAGE_GRID_COLS, VIDEO_FRAME_NUM, ...
+    CenterFrequency/1e9, Power_gain);
 
-state = STATE_BROADCAST;
+%% ================= 状态机初始化 =================
+state = STATE_SENDING;
 sweep_ptr = 1;
 round_count = 1;
+idle_cnt = 0;
 
 %% ================= UI 配置（发射端） =================
 tx_ui.enable = true;
@@ -81,7 +126,7 @@ radio_tx.InterpolationFactor = 512;
 radio_tx.ClockSource = 'External';
 radio_tx.UnderrunOutputPort = true;
 
-% 反向链路接收（沿用原始写法）
+% 反向链路接收（保留硬件初始化，但不依赖其数据做决策）
 radio_rx = comm.SDRuReceiver( ...
     'Platform','X310', ...
     'IPAddress','192.168.10.2', ...
@@ -100,48 +145,11 @@ cleanupObj = onCleanup(@() safe_release_txrx(radio_tx, radio_rx));
 %% ================= 主循环 =================
 for idx = 1:200000
     burst_list = [];
-    Par_Rec_signal = zeros(FB_RX_SAMPLES,1);
+    Par_Rec_signal = zeros(FB_RX_SAMPLES, 1);
 
-    % ---------- UI 控制 ----------
-    if tx_ui.enable && mod(idx, tx_ui.ctrl_period) == 0
-        ctrl = ui_try_get_control(tx_ui);
-        if isfield(ctrl, 'apply') && ctrl.apply
-            new_payload = [];
-            if isfield(ctrl, 'str') && ~isempty(ctrl.str)
-                try
-                    if exist(char(ctrl.str), 'file')
-                        img_file_name = char(ctrl.str);
-                        new_payload = build_file_payload(img_file_name);
-                    else
-                        new_payload = uint8(unicode2native(char(ctrl.str), 'UTF-8')).';
-                    end
-                catch
-                    try
-                        new_payload = uint8(char(ctrl.str)).';
-                    catch
-                        new_payload = [];
-                    end
-                end
-            end
-
-            if ~isempty(new_payload)
-                payload_bytes = new_payload(:);
-                session_id = mod(session_id, 65535) + 1;
-                [~, tx_cache] = Data_trans_sig_Gen(Anti_Jamming_Mode_bef, payload_bytes, [], session_id);
-                total_pkts = tx_cache.total_pkt_num;
-
-                state = STATE_BROADCAST;
-                sweep_ptr = 1;
-                round_count = 1;
-
-                fprintf('[TX-UI] 已应用新的发送内容，session=%d，总包数=%d\n', session_id, total_pkts);
-            end
-        end
-    end
-
-    % ---------- UDP广播主链路 ----------
+    % ---------- 状态机 ----------
     switch state
-        case STATE_BROADCAST
+        case STATE_SENDING
             burst_end = min(sweep_ptr + BURST_PKTS - 1, total_pkts);
             burst_list = sweep_ptr:burst_end;
             tx_sig = build_tx_slot(tx_cache, burst_list, BUS_SLOT_SAMPLES, GUARD_PRE, GUARD_BETWEEN, GUARD_POST);
@@ -150,10 +158,28 @@ for idx = 1:200000
             if sweep_ptr > total_pkts
                 sweep_ptr = 1;
                 round_count = round_count + 1;
-                fprintf('[TX-ROUND] 完成一轮全包广播，round=%d\n', round_count);
+                fprintf('[TX-ROUND] 完成第 %d 轮发送\n', round_count);
+
+                if round_count > NUM_ROUNDS
+                    state = STATE_DONE;
+                    fprintf('[TX-DONE] 全部 %d 轮发送完成，停止发射\n', NUM_ROUNDS);
+                else
+                    state = STATE_IDLE;
+                    idle_cnt = IDLE_SLOTS;
+                end
+            else
+                state = STATE_IDLE;
+                idle_cnt = IDLE_SLOTS;
             end
 
-        otherwise
+        case STATE_IDLE
+            tx_sig = zeros(BUS_SLOT_SAMPLES, 1);
+            idle_cnt = idle_cnt - 1;
+            if idle_cnt <= 0
+                state = STATE_SENDING;
+            end
+
+        case STATE_DONE
             tx_sig = zeros(BUS_SLOT_SAMPLES, 1);
     end
 
@@ -168,33 +194,28 @@ for idx = 1:200000
             warning('[TX-WARN] Underrun');
         end
         if rx_overrun
-            warning('[TX-WARN] 反向链路 Overrun');
+            % 反向链路 overrun 不影响主链路，静默
         end
     catch ME
         warning('[TX-ERR] 硬件异常：%s', ME.message);
         continue;
     end
 
-    % ---------- 复原原始反向链路解析 ----------
-    [Par_Datavalid,Carrier_select_new,Trans_power_select_new,Power_gain_select_new,Anti_Jamming_Mode_new,~] = ...
+    % ---------- 反向链路解析（尽力而为，不依赖） ----------
+    [Par_Datavalid, Carrier_select_new, Trans_power_select_new, Power_gain_select_new, Anti_Jamming_Mode_new, ~] = ...
         Par_Rece_sig_Gen(Par_Rec_signal);
 
     if Par_Datavalid == 1
-        fprintf(['[TX-PAR] 收到反向参数: Carrier_select=%d | Trans_power_select=%d | ', ...
-                 'Power_gain_select=%d | Anti_Jamming_Mode=%d\n'], ...
-                 Carrier_select_new, Trans_power_select_new, Power_gain_select_new, Anti_Jamming_Mode_new);
+        fprintf('[TX-PAR] 收到反向参数: Carrier=%d | Power=%d | Gain=%d | Mode=%d\n', ...
+            Carrier_select_new, Trans_power_select_new, Power_gain_select_new, Anti_Jamming_Mode_new);
 
-        % 模式变化 -> 重生成数据缓存
         if Anti_Jamming_Mode_bef ~= Anti_Jamming_Mode_new
             Anti_Jamming_Mode_bef = Anti_Jamming_Mode_new;
-            [~, tx_cache] = Data_trans_sig_Gen(Anti_Jamming_Mode_bef, payload_bytes, [], session_id);
+            [~, tx_cache] = Data_trans_sig_Gen(Anti_Jamming_Mode_bef, block_meta, [], session_id);
             total_pkts = tx_cache.total_pkt_num;
-            sweep_ptr = 1;
-            round_count = 1;
-            fprintf('[TX-PAR] Anti_Jamming_Mode 已更新为 %d，重新生成广播缓存\n', Anti_Jamming_Mode_bef);
+            fprintf('[TX-PAR] Anti_Jamming_Mode 已更新为 %d\n', Anti_Jamming_Mode_bef);
         end
 
-        % 频点 / 增益 / 发射功率变化
         if Carrier_select_rec_bef ~= Carrier_select_new || ...
            Power_gain_select_rec_bef ~= Power_gain_select_new || ...
            Trans_power_select_rec ~= Trans_power_select_new
@@ -210,7 +231,7 @@ for idx = 1:200000
             radio_tx.CenterFrequency = CenterFrequency;
             radio_tx.Gain = Power_gain;
 
-            fprintf('[TX-PAR] 已应用参数 -> CF=%.2f GHz | Gain=%d dB | PowerIdx=%d\n', ...
+            fprintf('[TX-PAR] 参数已应用 -> CF=%.2f GHz | Gain=%d dB | PowerIdx=%d\n', ...
                 CenterFrequency/1e9, Power_gain, Trans_power_select_rec);
         end
     end
@@ -219,15 +240,24 @@ for idx = 1:200000
     if tx_ui.enable && mod(idx, tx_ui.post_period) == 0
         tx_payload_ui = build_tx_ui_payload( ...
             tx_sig, Par_Rec_signal, CenterFrequency, Power_gain, samp_rate, ...
-            state, session_id, total_pkts, img_file_name, burst_list, round_count, ...
+            state, session_id, total_pkts, img_path, burst_list, round_count, ...
             Carrier_select_rec_bef, Trans_power_select_rec, Power_gain_select_rec_bef, Anti_Jamming_Mode_bef);
         tx_ui = ui_try_post(tx_ui, '/api/data', tx_payload_ui);
     end
 
     if mod(idx, 10) == 0
-        fprintf('[TX] idx=%d | round=%d | burst=%s | next_ptr=%d | CF=%.2f GHz | Gain=%d dB | Mode=%d\n', ...
-            idx, round_count, mat2str(burst_list), sweep_ptr, ...
-            CenterFrequency/1e9, Power_gain, Anti_Jamming_Mode_bef);
+        state_names = {'SENDING', 'IDLE', 'DONE'};
+        fprintf('[TX] idx=%d | %s | round=%d/%d | burst=%s | ptr=%d\n', ...
+            idx, state_names{state}, round_count, NUM_ROUNDS, ...
+            mat2str(burst_list), sweep_ptr);
+    end
+
+    if state == STATE_DONE
+        % 发送完毕后等待一小段再退出，让接收机处理完最后的数据
+        if idx > 100 && sweep_ptr == 1
+            fprintf('[TX] 传输结束，退出。\n');
+            break;
+        end
     end
 end
 
@@ -235,18 +265,6 @@ release(radio_rx);
 release(radio_tx);
 
 %% ================= 局部函数 =================
-function payload_bytes = build_file_payload(file_name)
-fid_img = fopen(file_name, 'rb');
-assert(fid_img ~= -1, '无法打开待发送图片文件：%s', file_name);
-img_file_bytes = fread(fid_img, inf, 'uint8=>uint8');
-fclose(fid_img);
-
-[~, ~, img_ext] = fileparts(file_name);
-img_ext_bytes = uint8(img_ext);
-img_ext_len = uint8(length(img_ext_bytes));
-payload_bytes = [img_ext_len; img_ext_bytes(:); img_file_bytes(:)];
-end
-
 function sig_out = build_tx_slot(tx_cache, pkt_list, slot_len, guard_pre, guard_between, guard_post)
 sig_out = zeros(slot_len, 1);
 wr = guard_pre + 1;
@@ -374,6 +392,12 @@ else
     burst_text = mat2str(burst_list);
 end
 
+state_names = {'SENDING', 'IDLE', 'DONE'};
+state_text = 'UNKNOWN';
+if state >= 1 && state <= 3
+    state_text = state_names{state};
+end
+
 par_txt = sprintf('Carrier=%d | PowerIdx=%d | GainIdx=%d | Mode=%d', ...
     Carrier_select_rec, Trans_power_select_rec, Power_gain_select_rec, Anti_Jamming_Mode_rec);
 
@@ -390,8 +414,8 @@ data.rx_time.amp  = reshape(amp_fb, 1, []);
 data.status = struct();
 data.status.tx_valid = '有效';
 data.status.tx_mod = 'QPSK/BPSK自适应';
-data.status.tx_mode = sprintf('UDP广播 | session=%d | total_pkt=%d | round=%d | burst=%s', ...
-    session_id, total_pkts, round_count, burst_text);
+data.status.tx_mode = sprintf('分块渐进 | %s | session=%d | total=%d | round=%d/%d | burst=%s', ...
+    state_text, session_id, total_pkts, round_count, 999, burst_text);
 data.status.tx_carrier = sprintf('%.2f GHz', CenterFrequency / 1e9);
 data.status.tx_samp = sprintf('%.2f kHz', samp_rate / 1e3);
 data.status.tx_gain = sprintf('%d dB', Power_gain);

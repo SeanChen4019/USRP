@@ -1,5 +1,5 @@
 function [str_rec, Rec_sig_afr, data_flag, err_valid, err_bit_num, total_num, frame_packets] = Data_Rece_sig_Gen(Anti_Jamming_Mode_select_rec, Trans_sig_data, PER_test, Threshold)
-% 高速可靠传输版：支持在一个接收 buffer 中解析多个业务包
+% 分块渐进式传输版：支持在一个接收 buffer 中解析多个块包
 
 defs = link_phy_defs();
 
@@ -10,7 +10,9 @@ err_bit_num = 0;
 total_num = 0;
 str_rec = [];
 frame_packets = struct('Session_ID', {}, 'Frame_num', {}, 'Total_frame_num', {}, ...
-    'Payload_bytes', {}, 'ZeroPadding_num', {}, 'Payload_length_bits', {});
+    'Payload_bytes', {}, 'ZeroPadding_num', {}, 'Payload_length_bits', {}, ...
+    'block_row', {}, 'block_col', {}, 'block_total_rows', {}, 'block_total_cols', {}, ...
+    'block_crc32', {}, 'block_type', {});
 
 sps = 4;
 rxfilter = comm.RaisedCosineReceiveFilter( ...
@@ -144,6 +146,23 @@ for j = 1:length(index_start_temp)
     one_pkt.Payload_bytes = payload_bytes;
     one_pkt.ZeroPadding_num = zero_padding_num_rec;
     one_pkt.Payload_length_bits = payload_length_rec;
+
+    % 解析块元数据: row(1) col(1) total_rows(1) total_cols(1) type(1) crc32(4)
+    if length(payload_bytes) >= 9
+        one_pkt.block_row = double(payload_bytes(1));
+        one_pkt.block_col = double(payload_bytes(2));
+        one_pkt.block_total_rows = double(payload_bytes(3));
+        one_pkt.block_total_cols = double(payload_bytes(4));
+        one_pkt.block_type = double(payload_bytes(5));
+        one_pkt.block_crc32 = typecast(payload_bytes(6:9), 'uint32');
+    else
+        one_pkt.block_row = -1;
+        one_pkt.block_col = -1;
+        one_pkt.block_total_rows = 0;
+        one_pkt.block_total_cols = 0;
+        one_pkt.block_type = -1;
+        one_pkt.block_crc32 = uint32(0);
+    end
 
     frame_packets(end+1) = one_pkt; %#ok<AGROW>
     str_rec = payload_bytes;
