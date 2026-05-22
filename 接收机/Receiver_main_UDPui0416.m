@@ -25,6 +25,8 @@ IMAGE_GRID_ROWS = 8;
 IMAGE_GRID_COLS = 8;
 VIDEO_FRAME_NUM = 20;
 
+RX_MODE = 1;  % 1=仅图像, 2=仅视频, 3=图像+视频（需与发射端一致）
+
 STATE_COLLECT  = 1;
 STATE_COMPLETE = 2;
 
@@ -40,44 +42,54 @@ CenterFrequency = Carrier_set(Carrier_select_bef);
 
 CONTROL_TX_INTERVAL = 20;
 
-%% ================= 预处理：预存图片和视频块数据 =================
+%% ================= 预处理：预存媒体块数据（按 RX_MODE） =================
 script_dir = fileparts(mfilename('fullpath'));
 if isempty(script_dir)
     script_dir = pwd;
 end
-
-% 确保函数文件可被找到
 addpath(script_dir);
 
+mode_names = {'', '仅图像', '仅视频', '图像+视频'};
+fprintf('[RX-INIT] 接收模式: %s\n', mode_names{RX_MODE});
+
+has_image = ismember(RX_MODE, [1, 3]);
+has_video = ismember(RX_MODE, [2, 3]);
+
 % 媒体文件路径：优先本地，其次发射机目录
+tx_dir = fullfile(script_dir, '..', '发射机');
 img_path = fullfile(script_dir, 'p2.jpg');
 if ~exist(img_path, 'file')
-    tx_dir = fullfile(script_dir, '..', '发射机');
     img_path = fullfile(tx_dir, 'p2.jpg');
 end
-
 video_path = fullfile(script_dir, '视频.mp4');
 if ~exist(video_path, 'file')
-    tx_dir = fullfile(script_dir, '..', '发射机');
     video_path = fullfile(tx_dir, '视频.mp4');
 end
 
-fprintf('[RX-INIT] 预存图片和视频块数据...\n');
+if has_image
+    fprintf('[RX-INIT] 预存图片块数据...\n');
+    [img_blocks, img_crc] = preprocess_image(img_path, IMAGE_GRID_ROWS, IMAGE_GRID_COLS);
+    [info_h, info_w] = get_image_dims(img_path);
+    img_received = false(IMAGE_GRID_ROWS, IMAGE_GRID_COLS);
+    img_grid_data = cell(IMAGE_GRID_ROWS, IMAGE_GRID_COLS);
+else
+    img_blocks = {}; img_crc = []; info_h = 240; info_w = 320;
+    img_received = []; img_grid_data = {};
+end
 
-[img_blocks, img_crc] = preprocess_image(img_path, IMAGE_GRID_ROWS, IMAGE_GRID_COLS);
-[info_h, info_w] = get_image_dims(img_path);
+if has_video
+    fprintf('[RX-INIT] 预存视频帧数据...\n');
+    [video_blocks_data, video_crc] = preprocess_video(video_path, VIDEO_FRAME_NUM);
+    video_received = false(VIDEO_FRAME_NUM, 1);
+    video_frame_data = cell(VIDEO_FRAME_NUM, 1);
+else
+    video_blocks_data = {}; video_crc = [];
+    video_received = []; video_frame_data = {};
+end
 
-[video_blocks_data, video_crc] = preprocess_video(video_path, VIDEO_FRAME_NUM);
-
-% 块接收状态网格
-img_received = false(IMAGE_GRID_ROWS, IMAGE_GRID_COLS);
-img_grid_data = cell(IMAGE_GRID_ROWS, IMAGE_GRID_COLS);
-
-video_received = false(VIDEO_FRAME_NUM, 1);
-video_frame_data = cell(VIDEO_FRAME_NUM, 1);
-
-fprintf('[RX-INIT] 预存完成: 图片 %dx%d=%d块 | 视频 %d帧\n', ...
-    IMAGE_GRID_ROWS, IMAGE_GRID_COLS, IMAGE_GRID_ROWS*IMAGE_GRID_COLS, VIDEO_FRAME_NUM);
+img_total = IMAGE_GRID_ROWS * IMAGE_GRID_COLS;
+vid_total = VIDEO_FRAME_NUM;
+fprintf('[RX-INIT] 预存完成 | 图片 %d块 | 视频 %d帧\n', img_total, vid_total);
 
 %% ================= 接收缓存 =================
 rx_session_id = 0;
@@ -207,8 +219,12 @@ for idx = 1:100000
     end
 
     % ---------- 动态调门限 / 增益 ----------
-    total_blocks = IMAGE_GRID_ROWS * IMAGE_GRID_COLS + VIDEO_FRAME_NUM;
-    recv_num = sum(img_received(:)) + sum(video_received(:));
+    total_blocks = 0;
+    if has_image, total_blocks = total_blocks + img_total; end
+    if has_video, total_blocks = total_blocks + vid_total; end
+    recv_num = 0;
+    if has_image, recv_num = recv_num + sum(img_received(:)); end
+    if has_video, recv_num = recv_num + sum(video_received(:)); end
     missing_num = total_blocks - recv_num;
 
     if missing_num <= 8
@@ -240,22 +256,24 @@ for idx = 1:100000
                 rx_total_pkt_num = pkt.Total_frame_num;
                 rx_pkt_valid = false(1, max(10000, rx_total_pkt_num));
 
-                img_received(:) = false;
-                img_grid_data = cell(IMAGE_GRID_ROWS, IMAGE_GRID_COLS);
-                video_received(:) = false;
-                video_frame_data = cell(VIDEO_FRAME_NUM, 1);
+                if has_image
+                    img_received(:) = false;
+                    img_grid_data = cell(IMAGE_GRID_ROWS, IMAGE_GRID_COLS);
+                end
+                if has_video
+                    video_received(:) = false;
+                    video_frame_data = cell(VIDEO_FRAME_NUM, 1);
+                end
 
                 img_rebuild_done = false;
-                rebuild_status_txt = sprintf('检测到新会话 session=%d，总块数=%d', ...
-                    rx_session_id, rx_total_pkt_num);
+                rebuild_status_txt = sprintf('新会话 session=%d，总块=%d', rx_session_id, rx_total_pkt_num);
 
                 state = STATE_COLLECT;
                 prev_img_recv = 0;
                 prev_vid_recv = 0;
                 dup_pkt_count = 0;
 
-                fprintf('[RX-SESSION] 新会话：session=%d | total=%d\n', ...
-                    rx_session_id, rx_total_pkt_num);
+                fprintf('[RX-SESSION] 新会话：session=%d | total=%d\n', rx_session_id, rx_total_pkt_num);
             end
 
             if pkt.Frame_num >= 1 && pkt.Frame_num <= length(rx_pkt_valid)
@@ -269,8 +287,7 @@ for idx = 1:100000
                     blk_crc = pkt.block_crc32;
 
                     if blk_row >= 0 && blk_col >= 0
-                        if blk_type == 0
-                            % 图片块
+                        if blk_type == 0 && has_image
                             r = blk_row + 1;
                             c = blk_col + 1;
                             if r >= 1 && r <= IMAGE_GRID_ROWS && c >= 1 && c <= IMAGE_GRID_COLS
@@ -279,12 +296,10 @@ for idx = 1:100000
                                     img_received(r, c) = true;
                                     img_grid_data{r, c} = img_blocks{r, c};
                                 else
-                                    fprintf('[RX-WARN] 图片块(%d,%d) CRC不匹配: rx=0x%08X expected=0x%08X\n', ...
-                                        blk_row, blk_col, blk_crc, expected_crc);
+                                    fprintf('[RX-WARN] 图片块(%d,%d) CRC mismatch\n', blk_row, blk_col);
                                 end
                             end
-                        elseif blk_type == 1
-                            % 视频帧块
+                        elseif blk_type == 1 && has_video
                             f = blk_row + 1;
                             if f >= 1 && f <= VIDEO_FRAME_NUM
                                 expected_crc = video_crc(f);
@@ -292,8 +307,7 @@ for idx = 1:100000
                                     video_received(f) = true;
                                     video_frame_data{f} = video_blocks_data{f};
                                 else
-                                    fprintf('[RX-WARN] 视频帧%d CRC不匹配: rx=0x%08X expected=0x%08X\n', ...
-                                        blk_row, blk_crc, expected_crc);
+                                    fprintf('[RX-WARN] 视频帧%d CRC mismatch\n', blk_row);
                                 end
                             end
                         end
@@ -306,9 +320,9 @@ for idx = 1:100000
     end
 
     % ---------- 统计与显示更新 ----------
-    img_recv = sum(img_received(:));
-    vid_recv = sum(video_received(:));
-    total_blocks = IMAGE_GRID_ROWS * IMAGE_GRID_COLS + VIDEO_FRAME_NUM;
+    img_recv = 0; vid_recv = 0;
+    if has_image, img_recv = sum(img_received(:)); end
+    if has_video, vid_recv = sum(video_received(:)); end
     total_recv = img_recv + vid_recv;
     missing_num = total_blocks - total_recv;
 
@@ -317,33 +331,37 @@ for idx = 1:100000
     prev_vid_recv = vid_recv;
 
     if progress_happened
-        fprintf('[RX-STATE] 图片 %d/%d | 视频 %d/%d | 总计 %d/%d | dup=%d\n', ...
-            img_recv, IMAGE_GRID_ROWS*IMAGE_GRID_COLS, ...
-            vid_recv, VIDEO_FRAME_NUM, total_recv, total_blocks, dup_pkt_count);
+        if has_image && has_video
+            fprintf('[RX-STATE] 图片 %d/%d | 视频 %d/%d | 总计 %d/%d | dup=%d\n', ...
+                img_recv, img_total, vid_recv, vid_total, total_recv, total_blocks, dup_pkt_count);
+        elseif has_image
+            fprintf('[RX-STATE] 图片 %d/%d | dup=%d\n', img_recv, img_total, dup_pkt_count);
+        else
+            fprintf('[RX-STATE] 视频 %d/%d | dup=%d\n', vid_recv, vid_total, dup_pkt_count);
+        end
 
-        % 更新显示
-        update_display(fig_main, img_grid_data, img_received, IMAGE_GRID_ROWS, IMAGE_GRID_COLS, ...
-            info_h, info_w, video_frame_data, video_received, VIDEO_FRAME_NUM);
+        update_display(fig_main, has_image, has_video, ...
+            img_grid_data, img_received, IMAGE_GRID_ROWS, IMAGE_GRID_COLS, info_h, info_w, ...
+            video_frame_data, video_received, VIDEO_FRAME_NUM);
         drawnow;
     end
 
     % ---------- 完成判定 ----------
-    if state == STATE_COLLECT && missing_num == 0
+    if state == STATE_COLLECT && missing_num == 0 && total_blocks > 0
         state = STATE_COMPLETE;
         img_rebuild_done = true;
-        rebuild_status_txt = sprintf('全部块收齐: 图片 %d/%d, 视频 %d/%d', ...
-            img_recv, IMAGE_GRID_ROWS*IMAGE_GRID_COLS, vid_recv, VIDEO_FRAME_NUM);
-        fprintf('[RX-STATE] COMPLETE: %s\n', rebuild_status_txt);
+        fprintf('[RX-STATE] COMPLETE: 全部 %d 块收齐\n', total_blocks);
     end
 
     % ---------- 状态文本 ----------
     if state == STATE_COMPLETE
-        rebuild_status_txt = sprintf('传输完成: 图片%d/%d 视频%d/%d (完整)', ...
-            img_recv, IMAGE_GRID_ROWS*IMAGE_GRID_COLS, vid_recv, VIDEO_FRAME_NUM);
+        rebuild_status_txt = sprintf('传输完成: 全部 %d/%d 块', total_recv, total_blocks);
     else
-        rebuild_status_txt = sprintf('收块中: 图片%d/%d 视频%d/%d | 缺失%d | 重复%d', ...
-            img_recv, IMAGE_GRID_ROWS*IMAGE_GRID_COLS, ...
-            vid_recv, VIDEO_FRAME_NUM, missing_num, dup_pkt_count);
+        parts = {};
+        if has_image, parts{end+1} = sprintf('图片%d/%d', img_recv, img_total); end
+        if has_video, parts{end+1} = sprintf('视频%d/%d', vid_recv, vid_total); end
+        rebuild_status_txt = ['收块中: ', strjoin(parts, ' | '), ...
+            sprintf(' | 缺失%d | 重复%d', missing_num, dup_pkt_count)];
     end
 
     % ---------- UI ----------
@@ -356,9 +374,16 @@ for idx = 1:100000
     end
 
     if mod(idx, 10) == 0
-        fprintf('[RX] idx=%d | state=%d | img=%d/%d | vid=%d/%d | dup=%d\n', ...
-            idx, state, img_recv, IMAGE_GRID_ROWS*IMAGE_GRID_COLS, ...
-            vid_recv, VIDEO_FRAME_NUM, dup_pkt_count);
+        if has_image && has_video
+            fprintf('[RX] idx=%d | state=%d | img=%d/%d | vid=%d/%d | dup=%d\n', ...
+                idx, state, img_recv, img_total, vid_recv, vid_total, dup_pkt_count);
+        elseif has_image
+            fprintf('[RX] idx=%d | state=%d | img=%d/%d | dup=%d\n', ...
+                idx, state, img_recv, img_total, dup_pkt_count);
+        else
+            fprintf('[RX] idx=%d | state=%d | vid=%d/%d | dup=%d\n', ...
+                idx, state, vid_recv, vid_total, dup_pkt_count);
+        end
     end
 end
 
@@ -369,7 +394,8 @@ if isvalid(fig_main)
 end
 
 %% ================= 局部函数 =================
-function update_display(fig, img_grid_data, img_received, grid_rows, grid_cols, img_h, img_w, ...
+function update_display(fig, has_image, has_video, ...
+    img_grid_data, img_received, grid_rows, grid_cols, img_h, img_w, ...
     video_frame_data, video_received, video_frame_count)
 
 if ~isvalid(fig)
@@ -378,18 +404,31 @@ end
 figure(fig);
 clf;
 
+if has_image && has_video
+    % 双栏：左图右视频
+    subplot(1, 2, 1);
+    draw_image_grid(img_grid_data, img_received, grid_rows, grid_cols, img_h, img_w);
+    subplot(1, 2, 2);
+    draw_video_grid(video_frame_data, video_received, video_frame_count);
+elseif has_image
+    % 仅图像：全窗口
+    draw_image_grid(img_grid_data, img_received, grid_rows, grid_cols, img_h, img_w);
+elseif has_video
+    % 仅视频：全窗口
+    draw_video_grid(video_frame_data, video_received, video_frame_count);
+end
+
+drawnow;
+end
+
+function draw_image_grid(img_grid_data, img_received, grid_rows, grid_cols, img_h, img_w)
 block_h = floor(img_h / grid_rows);
 block_w = floor(img_w / grid_cols);
-
-% 左侧：图片块网格
-subplot(1, 2, 1);
 full_img = zeros(img_h, img_w, 3, 'uint8');
 for r = 1:grid_rows
     for c = 1:grid_cols
-        y1 = (r-1)*block_h + 1;
-        y2 = r*block_h;
-        x1 = (c-1)*block_w + 1;
-        x2 = c*block_w;
+        y1 = (r-1)*block_h + 1; y2 = r*block_h;
+        x1 = (c-1)*block_w + 1; x2 = c*block_w;
         if img_received(r, c) && ~isempty(img_grid_data{r, c})
             try
                 block_img = imdecode(img_grid_data{r, c});
@@ -404,22 +443,19 @@ for r = 1:grid_rows
     end
 end
 imshow(full_img);
-title(sprintf('图片恢复: %d/%d 块', sum(img_received(:)), grid_rows*grid_cols), 'FontSize', 12);
+title(sprintf('image: %d/%d', sum(img_received(:)), grid_rows*grid_cols), 'FontSize', 12);
+end
 
-% 右侧：视频帧缩略图网格 (4行×5列)
-subplot(1, 2, 2);
+function draw_video_grid(video_frame_data, video_received, video_frame_count)
 vid_cols = 5;
 vid_rows = ceil(video_frame_count / vid_cols);
-frame_w = 160;
-frame_h = 120;
+frame_w = 160; frame_h = 120;
 vid_img = zeros(frame_h * vid_rows, frame_w * vid_cols, 3, 'uint8');
 for f = 1:video_frame_count
     r = ceil(f / vid_cols);
     c = mod(f - 1, vid_cols) + 1;
-    y1 = (r-1)*frame_h + 1;
-    y2 = r*frame_h;
-    x1 = (c-1)*frame_w + 1;
-    x2 = c*frame_w;
+    y1 = (r-1)*frame_h + 1; y2 = r*frame_h;
+    x1 = (c-1)*frame_w + 1; x2 = c*frame_w;
     if video_received(f) && ~isempty(video_frame_data{f})
         try
             frame_img = imdecode(video_frame_data{f});
@@ -433,9 +469,7 @@ for f = 1:video_frame_count
     end
 end
 imshow(vid_img);
-title(sprintf('视频帧恢复: %d/%d 帧', sum(video_received(:)), video_frame_count), 'FontSize', 12);
-
-drawnow;
+title(sprintf('video: %d/%d', sum(video_received(:)), video_frame_count), 'FontSize', 12);
 end
 
 function img = imdecode(jpeg_bytes)

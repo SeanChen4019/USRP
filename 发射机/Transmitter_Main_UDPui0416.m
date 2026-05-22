@@ -32,6 +32,8 @@ IMAGE_GRID_ROWS  = 8;
 IMAGE_GRID_COLS  = 8;
 VIDEO_FRAME_NUM  = 20;
 
+TX_MODE = 1;  % 1=仅图像, 2=仅视频, 3=图像+视频
+
 STATE_SENDING = 1;
 STATE_IDLE    = 2;
 STATE_DONE    = 3;
@@ -59,48 +61,52 @@ if isempty(script_dir)
 end
 addpath(script_dir);
 
-%% ================= 预处理图片和视频为块 =================
-fprintf('[TX-INIT] 预处理图片和视频...\n');
+%% ================= 预处理媒体为块（按 TX_MODE） =================
+mode_names = {'', '仅图像', '仅视频', '图像+视频'};
+fprintf('[TX-INIT] 发送模式: %s\n', mode_names{TX_MODE});
 
-img_path = fullfile(script_dir, 'p2.jpg');
-[~, img_crc] = preprocess_image(img_path, IMAGE_GRID_ROWS, IMAGE_GRID_COLS);
-
-video_path = fullfile(script_dir, '视频.mp4');
-[~, video_crc] = preprocess_video(video_path, VIDEO_FRAME_NUM);
-
-% 合并所有块到一个列表
 block_meta = [];
-% 图片块: type=0
-for r = 1:IMAGE_GRID_ROWS
-    for c = 1:IMAGE_GRID_COLS
-        blk.row = r - 1;
-        blk.col = c - 1;
-        blk.total_rows = IMAGE_GRID_ROWS;
-        blk.total_cols = IMAGE_GRID_COLS;
-        blk.crc32 = img_crc(r, c);
-        blk.type = 0;
-        block_meta = [block_meta, blk];
+img_path = fullfile(script_dir, 'p2.jpg');
+video_path = fullfile(script_dir, '视频.mp4');
+
+if ismember(TX_MODE, [1, 3])
+    fprintf('[TX-INIT] 预处理图片...\n');
+    [~, img_crc] = preprocess_image(img_path, IMAGE_GRID_ROWS, IMAGE_GRID_COLS);
+    for r = 1:IMAGE_GRID_ROWS
+        for c = 1:IMAGE_GRID_COLS
+            blk.row = r - 1;
+            blk.col = c - 1;
+            blk.total_rows = IMAGE_GRID_ROWS;
+            blk.total_cols = IMAGE_GRID_COLS;
+            blk.crc32 = img_crc(r, c);
+            blk.type = 0;
+            block_meta = [block_meta, blk];
+        end
     end
 end
-% 视频帧块: type=1
-for f = 1:VIDEO_FRAME_NUM
-    blk.row = f - 1;
-    blk.col = 0;
-    blk.total_rows = VIDEO_FRAME_NUM;
-    blk.total_cols = 1;
-    blk.crc32 = video_crc(f);
-    blk.type = 1;
-    block_meta = [block_meta, blk];
+
+if ismember(TX_MODE, [2, 3])
+    fprintf('[TX-INIT] 预处理视频...\n');
+    [~, video_crc] = preprocess_video(video_path, VIDEO_FRAME_NUM);
+    for f = 1:VIDEO_FRAME_NUM
+        blk.row = f - 1;
+        blk.col = 0;
+        blk.total_rows = VIDEO_FRAME_NUM;
+        blk.total_cols = 1;
+        blk.crc32 = video_crc(f);
+        blk.type = 1;
+        block_meta = [block_meta, blk];
+    end
 end
 
 session_id = 1;
 [~, tx_cache] = Data_trans_sig_Gen(Anti_Jamming_Mode, block_meta, [], session_id);
 total_pkts = tx_cache.total_pkt_num;
 
-fprintf('[TX-INIT] session=%d | 总块数=%d (图片%dx%d=%d + 视频%d帧) | CF=%.2f GHz | Gain=%d dB\n', ...
-    session_id, total_pkts, IMAGE_GRID_ROWS, IMAGE_GRID_COLS, ...
-    IMAGE_GRID_ROWS*IMAGE_GRID_COLS, VIDEO_FRAME_NUM, ...
-    CenterFrequency/1e9, Power_gain);
+img_blocks_count = IMAGE_GRID_ROWS * IMAGE_GRID_COLS;
+vid_blocks_count = VIDEO_FRAME_NUM;
+fprintf('[TX-INIT] session=%d | 总块数=%d | CF=%.2f GHz | Gain=%d dB\n', ...
+    session_id, total_pkts, CenterFrequency/1e9, Power_gain);
 
 %% ================= 状态机初始化 =================
 state = STATE_SENDING;
