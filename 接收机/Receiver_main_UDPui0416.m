@@ -25,7 +25,7 @@ IMAGE_GRID_ROWS = 8;
 IMAGE_GRID_COLS = 8;
 VIDEO_FRAME_NUM = 20;
 
-RX_MODE = 1;  % 1=仅图像, 2=仅视频, 3=图像+视频（需与发射端一致）
+RX_MODE = 1;  % 1=仅图像, 2=仅视频, 3=图像+视频, 4=文本（需与发射端一致）
 
 TIMEOUT_IDLE = 500;  % 连续无新数据的空闲轮数，超时自动结束恢复
 
@@ -51,11 +51,12 @@ if isempty(script_dir)
 end
 addpath(script_dir);
 
-mode_names = {'仅图像', '仅视频', '图像+视频'};
+mode_names = {'仅图像', '仅视频', '图像+视频', '文本'};
 fprintf('[RX-INIT] 接收模式: %s\n', mode_names{RX_MODE});
 
 has_image = ismember(RX_MODE, [1, 3]);
 has_video = ismember(RX_MODE, [2, 3]);
+has_text  = (RX_MODE == 4);
 
 % 媒体文件路径：优先本地，其次发射机目录
 tx_dir = fullfile(script_dir, '..', '发射机');
@@ -89,6 +90,13 @@ else
     video_received = []; video_frame_data = {};
 end
 
+if has_text
+    text_total_pkts = 0;
+    text_pkt_received = [];
+    text_pkt_data = {};
+    fprintf('[RX-INIT] 文本接收模式\n');
+end
+
 img_total = IMAGE_GRID_ROWS * IMAGE_GRID_COLS;
 vid_total = VIDEO_FRAME_NUM;
 fprintf('[RX-INIT] 预存完成 | 图片 %d块 | 视频 %d帧\n', img_total, vid_total);
@@ -120,8 +128,12 @@ rx_ui.timeout = 0.03;
 rx_ui = ui_init(rx_ui);
 
 %% ================= 显示窗口 =================
-fig_main = figure('Name', '接收端 - 分块渐进式恢复', 'NumberTitle', 'off', ...
-    'Position', [50, 50, 1100, 650]);
+if has_text
+    fig_main = [];
+else
+    fig_main = figure('Name', '接收端 - 分块渐进式恢复', 'NumberTitle', 'off', ...
+        'Position', [50, 50, 1100, 650]);
+end
 
 %% ================= SDR 初始化 =================
 disp('正在初始化 USRP 硬件，请稍候...');
@@ -238,9 +250,11 @@ for idx = 1:100000
     total_blocks = 0;
     if has_image, total_blocks = total_blocks + img_total; end
     if has_video, total_blocks = total_blocks + vid_total; end
+    if has_text && text_total_pkts > 0, total_blocks = text_total_pkts; end
     recv_num = 0;
     if has_image, recv_num = recv_num + sum(img_received(:)); end
     if has_video, recv_num = recv_num + sum(video_received(:)); end
+    if has_text, recv_num = sum(text_pkt_received(:)); end
     missing_num = total_blocks - recv_num;
 
     if missing_num <= 8
@@ -279,6 +293,12 @@ for idx = 1:100000
                 if has_video
                     video_received(:) = false;
                     video_frame_data = cell(VIDEO_FRAME_NUM, 1);
+                end
+
+                if has_text
+                    text_total_pkts = 0;
+                    text_pkt_received = [];
+                    text_pkt_data = {};
                 end
 
                 img_rebuild_done = false;
@@ -326,6 +346,20 @@ for idx = 1:100000
                                     fprintf('[RX-WARN] 视频帧%d CRC mismatch\n', blk_row);
                                 end
                             end
+                        elseif blk_type == 2 && has_text
+                            pkt_idx = blk_row + 1;
+                            total_pkts = blk.total_rows;
+                            if text_total_pkts == 0
+                                text_total_pkts = total_pkts;
+                                text_pkt_received = false(1, total_pkts);
+                                text_pkt_data = cell(1, total_pkts);
+                                fprintf('[RX-TEXT] 检测到文本传输: %d 个包\n', total_pkts);
+                            end
+                            if pkt_idx >= 1 && pkt_idx <= length(text_pkt_received) && ~text_pkt_received(pkt_idx)
+                                text_pkt_received(pkt_idx) = true;
+                                text_pkt_data{pkt_idx} = pkt.Payload_bytes(10:end);
+                                fprintf('[RX-TEXT] 收到文本包 %d/%d\n', pkt_idx, text_total_pkts);
+                            end
                         end
                     end
                 else
@@ -336,19 +370,23 @@ for idx = 1:100000
     end
 
     % ---------- 统计与显示更新 ----------
-    img_recv = 0; vid_recv = 0;
+    img_recv = 0; vid_recv = 0; text_recv = 0;
     if has_image, img_recv = sum(img_received(:)); end
     if has_video, vid_recv = sum(video_received(:)); end
-    total_recv = img_recv + vid_recv;
+    if has_text, text_recv = sum(text_pkt_received(:)); end
+    total_recv = img_recv + vid_recv + text_recv;
     missing_num = total_blocks - total_recv;
 
-    progress_happened = (img_recv > prev_img_recv) || (vid_recv > prev_vid_recv);
+    progress_happened = (img_recv > prev_img_recv) || (vid_recv > prev_vid_recv) || (text_recv > prev_img_recv);
     prev_img_recv = img_recv;
     prev_vid_recv = vid_recv;
+    if has_text, prev_img_recv = text_recv; end
 
     if progress_happened
         last_progress_idx = idx;
-        if has_image && has_video
+        if has_text
+            fprintf('[RX-STATE] 文本 %d/%d | dup=%d\n', text_recv, total_blocks, dup_pkt_count);
+        elseif has_image && has_video
             fprintf('[RX-STATE] 图片 %d/%d | 视频 %d/%d | 总计 %d/%d | dup=%d\n', ...
                 img_recv, img_total, vid_recv, vid_total, total_recv, total_blocks, dup_pkt_count);
         elseif has_image
@@ -357,10 +395,12 @@ for idx = 1:100000
             fprintf('[RX-STATE] 视频 %d/%d | dup=%d\n', vid_recv, vid_total, dup_pkt_count);
         end
 
-        update_display(fig_main, has_image, has_video, ...
-            img_grid_data, img_received, IMAGE_GRID_ROWS, IMAGE_GRID_COLS, info_h, info_w, ...
-            video_frame_data, video_received, VIDEO_FRAME_NUM);
-        drawnow;
+        if ~has_text
+            update_display(fig_main, has_image, has_video, ...
+                img_grid_data, img_received, IMAGE_GRID_ROWS, IMAGE_GRID_COLS, info_h, info_w, ...
+                video_frame_data, video_received, VIDEO_FRAME_NUM);
+            drawnow;
+        end
     end
 
     % ---------- 完成判定 ----------
@@ -373,6 +413,8 @@ for idx = 1:100000
     % ---------- 状态文本 ----------
     if state == STATE_COMPLETE
         rebuild_status_txt = sprintf('传输完成: 全部 %d/%d 块', total_recv, total_blocks);
+    elseif has_text
+        rebuild_status_txt = sprintf('文本收包: %d/%d', text_recv, text_total_pkts);
     else
         parts = {};
         if has_image, parts{end+1} = sprintf('图片%d/%d', img_recv, img_total); end
@@ -391,7 +433,10 @@ for idx = 1:100000
     end
 
     if mod(idx, 10) == 0
-        if has_image && has_video
+        if has_text
+            fprintf('[RX] idx=%d | state=%d | text=%d/%d | dup=%d\n', ...
+                idx, state, text_recv, text_total_pkts, dup_pkt_count);
+        elseif has_image && has_video
             fprintf('[RX] idx=%d | state=%d | img=%d/%d | vid=%d/%d | dup=%d\n', ...
                 idx, state, img_recv, img_total, vid_recv, vid_total, dup_pkt_count);
         elseif has_image
@@ -452,6 +497,31 @@ if has_video
     end
     close(vw);
     fprintf('[RX-SAVE] 视频已保存: %s (%d/%d 帧)\n', vid_save_path, sum(video_received(:)), vid_total);
+end
+
+if has_text
+    fprintf('\n===== 接收到的文本 =====\n');
+    if text_total_pkts > 0
+        all_bytes = [];
+        for p = 1:text_total_pkts
+            if text_pkt_received(p) && ~isempty(text_pkt_data{p})
+                all_bytes = [all_bytes; text_pkt_data{p}(:)];
+            end
+        end
+        % 去除尾部零填充
+        last_nonzero = find(all_bytes > 0, 1, 'last');
+        if ~isempty(last_nonzero)
+            all_bytes = all_bytes(1:last_nonzero);
+        end
+        try
+            txt = native2unicode(all_bytes(:), 'UTF-8');
+            fprintf('%s\n', txt);
+        catch
+            fprintf('%s\n', char(all_bytes(:)'));
+        end
+    end
+    fprintf('========================\n');
+    fprintf('[RX-TEXT] 文本接收完成 (%d/%d 包)\n', text_recv, text_total_pkts);
 end
 
 fprintf('[RX-SAVE] 恢复文件输出至: %s\n', save_dir);

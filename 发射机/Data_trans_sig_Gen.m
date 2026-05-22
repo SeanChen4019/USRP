@@ -55,15 +55,30 @@ valid_bits_each = zeros(1, total_pkt_num);
 for pkt_id = 1:total_pkt_num
     blk = block_meta(pkt_id);
 
-    % 包载荷：row(8bit) + col(8bit) + total_rows(8bit) + total_cols(8bit) + type(8bit) + crc32(32bit) + 保留
     payload_this = zeros(payload_bytes_per_pkt, 1, 'uint8');
-    payload_this(1) = uint8(blk.row);
-    payload_this(2) = uint8(blk.col);
-    payload_this(3) = uint8(blk.total_rows);
-    payload_this(4) = uint8(blk.total_cols);
-    payload_this(5) = uint8(blk.type);
-    crc_bytes = typecast(uint32(blk.crc32), 'uint8');
-    payload_this(6:9) = crc_bytes(:);
+
+    if blk.type == 2
+        % 文本载荷: 复用图像/视频格式，type=2在byte4, 文本数据在byte9+
+        payload_this(1) = uint8(blk.row);       % pkt_idx
+        payload_this(2) = uint8(0);             % col=0
+        payload_this(3) = uint8(blk.total_rows); % total_pkts
+        payload_this(4) = uint8(0);             % total_cols=0
+        payload_this(5) = uint8(2);             % type=2
+        payload_this(6:9) = uint8([0 0 0 0]);   % crc32=0
+        if isfield(blk, 'payload') && ~isempty(blk.payload)
+            n = min(length(blk.payload), payload_bytes_per_pkt - 9);
+            payload_this(10:10+n-1) = blk.payload(1:n);
+        end
+    else
+        % 图像/视频载荷: row(1) + col(1) + total_rows(1) + total_cols(1) + type(1) + crc32(4) + 保留
+        payload_this(1) = uint8(blk.row);
+        payload_this(2) = uint8(blk.col);
+        payload_this(3) = uint8(blk.total_rows);
+        payload_this(4) = uint8(blk.total_cols);
+        payload_this(5) = uint8(blk.type);
+        crc_bytes = typecast(uint32(blk.crc32), 'uint8');
+        payload_this(6:9) = crc_bytes(:);
+    end
 
     payload_bits = bytes_to_bits(payload_this);
     valid_bits_each(pkt_id) = payload_bytes_per_pkt * 8;

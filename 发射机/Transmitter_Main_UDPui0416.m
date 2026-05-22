@@ -32,7 +32,9 @@ IMAGE_GRID_ROWS  = 8;
 IMAGE_GRID_COLS  = 8;
 VIDEO_FRAME_NUM  = 20;
 
-TX_MODE = 1;  % 1=仅图像, 2=仅视频, 3=图像+视频
+TX_MODE = 1;  % 1=仅图像, 2=仅视频, 3=图像+视频, 4=文本
+
+TEXT_STRING = 'Hello World! 这是一段通过USRP无线传输的测试文本。';  % TX_MODE=4时发送的文本
 
 STATE_SENDING = 1;
 STATE_IDLE    = 2;
@@ -62,7 +64,7 @@ end
 addpath(script_dir);
 
 %% ================= 预处理媒体为块（按 TX_MODE） =================
-mode_names = {'仅图像', '仅视频', '图像+视频'};
+mode_names = {'仅图像', '仅视频', '图像+视频', '文本'};
 fprintf('[TX-INIT] 发送模式: %s\n', mode_names{TX_MODE});
 
 block_meta = [];
@@ -95,6 +97,25 @@ if ismember(TX_MODE, [2, 3])
         blk.total_cols = 1;
         blk.crc32 = video_crc(f);
         blk.type = 1;
+        block_meta = [block_meta, blk];
+    end
+end
+
+if TX_MODE == 4
+    fprintf('[TX-INIT] 准备文本: "%s"\n', TEXT_STRING);
+    text_bytes = uint8(unicode2native(TEXT_STRING, 'UTF-8'));
+    bytes_per_pkt = 35;
+    total_text_pkts = ceil(length(text_bytes) / bytes_per_pkt);
+    for p = 1:total_text_pkts
+        st = (p-1)*bytes_per_pkt + 1;
+        ed = min(p*bytes_per_pkt, length(text_bytes));
+        blk.row = p - 1;
+        blk.col = 0;
+        blk.total_rows = total_text_pkts;
+        blk.total_cols = 0;
+        blk.crc32 = uint32(0);
+        blk.type = 2;
+        blk.payload = text_bytes(st:ed);
         block_meta = [block_meta, blk];
     end
 end
