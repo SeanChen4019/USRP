@@ -27,6 +27,8 @@ VIDEO_FRAME_NUM = 20;
 
 RX_MODE = 1;  % 1=仅图像, 2=仅视频, 3=图像+视频（需与发射端一致）
 
+TIMEOUT_IDLE = 500;  % 连续无新数据的空闲轮数，超时自动结束恢复
+
 STATE_COLLECT  = 1;
 STATE_COMPLETE = 2;
 
@@ -106,6 +108,7 @@ trans_sigs = zeros(FB_TX_SAMPLES, 1);
 prev_img_recv = 0;
 prev_vid_recv = 0;
 dup_pkt_count = 0;
+last_progress_idx = 0;
 
 %% ================= UI 配置（接收端） =================
 rx_ui.enable = true;
@@ -331,6 +334,7 @@ for idx = 1:100000
     prev_vid_recv = vid_recv;
 
     if progress_happened
+        last_progress_idx = idx;
         if has_image && has_video
             fprintf('[RX-STATE] 图片 %d/%d | 视频 %d/%d | 总计 %d/%d | dup=%d\n', ...
                 img_recv, img_total, vid_recv, vid_total, total_recv, total_blocks, dup_pkt_count);
@@ -384,6 +388,12 @@ for idx = 1:100000
             fprintf('[RX] idx=%d | state=%d | vid=%d/%d | dup=%d\n', ...
                 idx, state, vid_recv, vid_total, dup_pkt_count);
         end
+    end
+
+    % ---------- 空闲超时：连续无新数据则自动结束 ----------
+    if last_progress_idx > 0 && total_recv > 0 && (idx - last_progress_idx) > TIMEOUT_IDLE
+        fprintf('[RX-TIMEOUT] 连续 %d 轮无新数据，自动结束恢复\n', TIMEOUT_IDLE);
+        break;
     end
 end
 
