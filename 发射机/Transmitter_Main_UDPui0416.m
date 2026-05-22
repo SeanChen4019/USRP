@@ -206,38 +206,52 @@ for idx = 1:200000
         continue;
     end
 
-    % ---------- 反向链路解析（尽力而为，不依赖） ----------
-    [Par_Datavalid, Carrier_select_new, Trans_power_select_new, Power_gain_select_new, Anti_Jamming_Mode_new, ~] = ...
+    % ---------- 反向链路解析 ----------
+    [Par_Datavalid, session_id_rec, ack_base_rec, ack_bitmap_rec, Anti_Jamming_Mode_new, ~, Frame_type_rec] = ...
         Par_Rece_sig_Gen(Par_Rec_signal);
 
     if Par_Datavalid == 1
-        fprintf('[TX-PAR] 收到反向参数: Carrier=%d | Power=%d | Gain=%d | Mode=%d\n', ...
-            Carrier_select_new, Trans_power_select_new, Power_gain_select_new, Anti_Jamming_Mode_new);
+        if Frame_type_rec == 20
+            % 反向链路状态: session_id = [Carrier_idx(8bit) | SNR_quantized(8bit)]
+            rev_carrier_idx = double(bitshift(uint16(session_id_rec), -8));
+            rev_snr_byte    = double(bitand(uint16(session_id_rec), uint16(255)));
+            rev_snr_db      = rev_snr_byte - 20;  % 还原: 0..255 → -20..+235 dB
+            fprintf('[TX-REV] 反向链路状态: 载频索引=%d | SNR≈%d dB | 模式=%d\n', ...
+                rev_carrier_idx, rev_snr_db, Anti_Jamming_Mode_new);
+        else
+            % 原始参数更新
+            Carrier_select_new = session_id_rec;
+            Trans_power_select_new = ack_base_rec;
+            Power_gain_select_new = ack_bitmap_rec;
 
-        if Anti_Jamming_Mode_bef ~= Anti_Jamming_Mode_new
-            Anti_Jamming_Mode_bef = Anti_Jamming_Mode_new;
-            [~, tx_cache] = Data_trans_sig_Gen(Anti_Jamming_Mode_bef, block_meta, [], session_id);
-            total_pkts = tx_cache.total_pkt_num;
-            fprintf('[TX-PAR] Anti_Jamming_Mode 已更新为 %d\n', Anti_Jamming_Mode_bef);
-        end
+            fprintf('[TX-PAR] 收到反向参数: Carrier=%d | Power=%d | Gain=%d | Mode=%d\n', ...
+                Carrier_select_new, Trans_power_select_new, Power_gain_select_new, Anti_Jamming_Mode_new);
 
-        if Carrier_select_rec_bef ~= Carrier_select_new || ...
-           Power_gain_select_rec_bef ~= Power_gain_select_new || ...
-           Trans_power_select_rec ~= Trans_power_select_new
+            if Anti_Jamming_Mode_bef ~= Anti_Jamming_Mode_new
+                Anti_Jamming_Mode_bef = Anti_Jamming_Mode_new;
+                [~, tx_cache] = Data_trans_sig_Gen(Anti_Jamming_Mode_bef, block_meta, [], session_id);
+                total_pkts = tx_cache.total_pkt_num;
+                fprintf('[TX-PAR] Anti_Jamming_Mode 已更新为 %d\n', Anti_Jamming_Mode_bef);
+            end
 
-            Carrier_select_rec_bef = Carrier_select_new;
-            Power_gain_select_rec_bef = Power_gain_select_new;
-            Trans_power_select_rec = Trans_power_select_new;
+            if Carrier_select_rec_bef ~= Carrier_select_new || ...
+               Power_gain_select_rec_bef ~= Power_gain_select_new || ...
+               Trans_power_select_rec ~= Trans_power_select_new
 
-            CenterFrequency = Carrier_set(Carrier_select_new);
-            Power_gain = Power_gain_set(Power_gain_select_new);
-            Power = Power_set(Trans_power_select_new);
+                Carrier_select_rec_bef = Carrier_select_new;
+                Power_gain_select_rec_bef = Power_gain_select_new;
+                Trans_power_select_rec = Trans_power_select_new;
 
-            radio_tx.CenterFrequency = CenterFrequency;
-            radio_tx.Gain = Power_gain;
+                CenterFrequency = Carrier_set(Carrier_select_new);
+                Power_gain = Power_gain_set(Power_gain_select_new);
+                Power = Power_set(Trans_power_select_new);
 
-            fprintf('[TX-PAR] 参数已应用 -> CF=%.2f GHz | Gain=%d dB | PowerIdx=%d\n', ...
-                CenterFrequency/1e9, Power_gain, Trans_power_select_rec);
+                radio_tx.CenterFrequency = CenterFrequency;
+                radio_tx.Gain = Power_gain;
+
+                fprintf('[TX-PAR] 参数已应用 -> CF=%.2f GHz | Gain=%d dB | PowerIdx=%d\n', ...
+                    CenterFrequency/1e9, Power_gain, Trans_power_select_rec);
+            end
         end
     end
 

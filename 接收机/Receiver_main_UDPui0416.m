@@ -185,21 +185,34 @@ for idx = 1:100000
         end
     end
 
-    % ---------- 周期性参数反馈（尽力而为） ----------
+    % ---------- 周期性反向链路：发送载频索引 + SNR 给发射端 ----------
     if state == STATE_COMPLETE
         trans_sigs = zeros(FB_TX_SAMPLES, 1);
     else
         if mod(idx, CONTROL_TX_INTERVAL) == 0
+            % 计算当前信噪比
+            snr_val = snr_est(Data_Rec_signal);
+            snr_db = 10 * log10(max(snr_val, 0.001));
+            snr_byte = uint8(max(0, min(255, round(snr_db + 20))));
+
+            % 打包: FrameType=20(反向链路状态), session_id=载频(高8)+SNR(低8)
+            fb_session = bitshift(uint16(Carrier_select_bef), 8) + uint16(snr_byte);
+
             Par_Trans_sig = Par_trans_sig_Gen( ...
-                Anti_Jamming_Mode_bef, ...
-                Carrier_select_bef, ...
-                Trans_power_select_bef, ...
-                Power_gain_select_bef);
+                20, ...               % FrameType=20: 反向链路状态
+                fb_session, ...       % [Carrier_idx(8bit) | SNR_quantized(8bit)]
+                0, ...                % reserved
+                0, ...                % reserved
+                Anti_Jamming_Mode_bef);
 
             trans_sigs_sample_num = FB_TX_SAMPLES;
             zero_pad_num_par = trans_sigs_sample_num - length(Par_Trans_sig) - 2000;
             zero_pad_num_par = max(zero_pad_num_par, 0);
             trans_sigs = [zeros(zero_pad_num_par,1); Par_Trans_sig; zeros(2000,1)];
+
+            if mod(idx, CONTROL_TX_INTERVAL * 5) == 0
+                fprintf('[RX-REV] 反向链路: Carrier=%d | SNR≈%.1f dB\n', Carrier_select_bef, snr_db);
+            end
         else
             trans_sigs = zeros(FB_TX_SAMPLES, 1);
         end
