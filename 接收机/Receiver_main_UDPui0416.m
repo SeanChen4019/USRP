@@ -46,10 +46,21 @@ if isempty(script_dir)
     script_dir = pwd;
 end
 
-% 发射机目录下的媒体文件路径
-tx_dir = fullfile(script_dir, '..', '发射机');
-img_path = fullfile(tx_dir, 'p2.jpg');
-video_path = fullfile(tx_dir, '视频.mp4');
+% 确保函数文件可被找到
+addpath(script_dir);
+
+% 媒体文件路径：优先本地，其次发射机目录
+img_path = fullfile(script_dir, 'p2.jpg');
+if ~exist(img_path, 'file')
+    tx_dir = fullfile(script_dir, '..', '发射机');
+    img_path = fullfile(tx_dir, 'p2.jpg');
+end
+
+video_path = fullfile(script_dir, '视频.mp4');
+if ~exist(video_path, 'file')
+    tx_dir = fullfile(script_dir, '..', '发射机');
+    video_path = fullfile(tx_dir, '视频.mp4');
+end
 
 fprintf('[RX-INIT] 预存图片和视频块数据...\n');
 

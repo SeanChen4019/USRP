@@ -57,6 +57,7 @@ script_dir = fileparts(mfilename('fullpath'));
 if isempty(script_dir)
     script_dir = pwd;
 end
+addpath(script_dir);
 
 %% ================= 预处理图片和视频为块 =================
 fprintf('[TX-INIT] 预处理图片和视频...\n');
