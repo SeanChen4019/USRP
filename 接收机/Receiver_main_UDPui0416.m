@@ -457,7 +457,7 @@ end
 
 release(radio_rx);
 release(radio_tx);
-if isvalid(fig_main)
+if ~isempty(fig_main) && isvalid(fig_main)
     close(fig_main);
 end
 
