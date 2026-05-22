@@ -62,7 +62,7 @@ end
 addpath(script_dir);
 
 %% ================= 预处理媒体为块（按 TX_MODE） =================
-mode_names = {'', '仅图像', '仅视频', '图像+视频'};
+mode_names = {'仅图像', '仅视频', '图像+视频'};
 fprintf('[TX-INIT] 发送模式: %s\n', mode_names{TX_MODE});
 
 block_meta = [];
@@ -103,8 +103,6 @@ session_id = 1;
 [~, tx_cache] = Data_trans_sig_Gen(Anti_Jamming_Mode, block_meta, [], session_id);
 total_pkts = tx_cache.total_pkt_num;
 
-img_blocks_count = IMAGE_GRID_ROWS * IMAGE_GRID_COLS;
-vid_blocks_count = VIDEO_FRAME_NUM;
 fprintf('[TX-INIT] session=%d | 总块数=%d | CF=%.2f GHz | Gain=%d dB\n', ...
     session_id, total_pkts, CenterFrequency/1e9, Power_gain);
 

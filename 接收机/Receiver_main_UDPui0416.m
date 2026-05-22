@@ -49,7 +49,7 @@ if isempty(script_dir)
 end
 addpath(script_dir);
 
-mode_names = {'', '仅图像', '仅视频', '图像+视频'};
+mode_names = {'仅图像', '仅视频', '图像+视频'};
 fprintf('[RX-INIT] 接收模式: %s\n', mode_names{RX_MODE});
 
 has_image = ismember(RX_MODE, [1, 3]);
