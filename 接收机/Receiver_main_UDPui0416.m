@@ -348,7 +348,7 @@ for idx = 1:100000
                             end
                         elseif blk_type == 2 && has_text
                             pkt_idx = blk_row + 1;
-                            total_pkts = blk.total_rows;
+                            total_pkts = pkt.block_total_rows;
                             if text_total_pkts == 0
                                 text_total_pkts = total_pkts;
                                 text_pkt_received = false(1, total_pkts);
