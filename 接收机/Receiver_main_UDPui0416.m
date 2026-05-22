@@ -27,7 +27,7 @@ VIDEO_FRAME_NUM = 20;
 
 RX_MODE = 1;  % 1=仅图像, 2=仅视频, 3=图像+视频, 4=文本（需与发射端一致）
 
-TIMEOUT_IDLE = 500;  % 连续无新数据的空闲轮数，超时自动结束恢复
+TIMEOUT_IDLE = 50;  % 连续无新数据的空闲轮数，超时自动结束恢复
 
 STATE_COLLECT  = 1;
 STATE_COMPLETE = 2;
