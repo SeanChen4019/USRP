@@ -393,6 +393,46 @@ if isvalid(fig_main)
     close(fig_main);
 end
 
+%% ================= 保存恢复结果 =================
+save_dir = fullfile(script_dir, 'recovered');
+if ~exist(save_dir, 'dir')
+    mkdir(save_dir);
+end
+
+if has_image
+    full_img = build_full_image(img_grid_data, img_received, IMAGE_GRID_ROWS, IMAGE_GRID_COLS, info_h, info_w);
+    img_save_path = fullfile(save_dir, 'recovered_image.jpg');
+    imwrite(full_img, img_save_path, 'JPEG');
+    fprintf('[RX-SAVE] 图片已保存: %s (%d/%d 块)\n', img_save_path, sum(img_received(:)), img_total);
+end
+
+if has_video
+    vid_save_path = fullfile(save_dir, 'recovered_video.avi');
+    vw = VideoWriter(vid_save_path, 'Motion JPEG AVI');
+    vw.FrameRate = 5;
+    open(vw);
+    for f = 1:VIDEO_FRAME_NUM
+        if video_received(f) && ~isempty(video_frame_data{f})
+            try
+                frame_img = imdecode(video_frame_data{f});
+                if ~isempty(frame_img)
+                    writeVideo(vw, frame_img);
+                else
+                    writeVideo(vw, zeros(120, 160, 3, 'uint8'));
+                end
+            catch
+                writeVideo(vw, zeros(120, 160, 3, 'uint8'));
+            end
+        else
+            writeVideo(vw, zeros(120, 160, 3, 'uint8'));
+        end
+    end
+    close(vw);
+    fprintf('[RX-SAVE] 视频已保存: %s (%d/%d 帧)\n', vid_save_path, sum(video_received(:)), vid_total);
+end
+
+fprintf('[RX-SAVE] 恢复文件输出至: %s\n', save_dir);
+
 %% ================= 局部函数 =================
 function update_display(fig, has_image, has_video, ...
     img_grid_data, img_received, grid_rows, grid_cols, img_h, img_w, ...
@@ -405,23 +445,24 @@ figure(fig);
 clf;
 
 if has_image && has_video
-    % 双栏：左图右视频
     subplot(1, 2, 1);
-    draw_image_grid(img_grid_data, img_received, grid_rows, grid_cols, img_h, img_w);
+    full_img = build_full_image(img_grid_data, img_received, grid_rows, grid_cols, img_h, img_w);
+    imshow(full_img);
+    title(sprintf('image: %d/%d', sum(img_received(:)), grid_rows*grid_cols), 'FontSize', 12);
     subplot(1, 2, 2);
     draw_video_grid(video_frame_data, video_received, video_frame_count);
 elseif has_image
-    % 仅图像：全窗口
-    draw_image_grid(img_grid_data, img_received, grid_rows, grid_cols, img_h, img_w);
+    full_img = build_full_image(img_grid_data, img_received, grid_rows, grid_cols, img_h, img_w);
+    imshow(full_img);
+    title(sprintf('image: %d/%d', sum(img_received(:)), grid_rows*grid_cols), 'FontSize', 12);
 elseif has_video
-    % 仅视频：全窗口
     draw_video_grid(video_frame_data, video_received, video_frame_count);
 end
 
 drawnow;
 end
 
-function draw_image_grid(img_grid_data, img_received, grid_rows, grid_cols, img_h, img_w)
+function full_img = build_full_image(img_grid_data, img_received, grid_rows, grid_cols, img_h, img_w)
 block_h = floor(img_h / grid_rows);
 block_w = floor(img_w / grid_cols);
 full_img = zeros(img_h, img_w, 3, 'uint8');
@@ -437,13 +478,10 @@ for r = 1:grid_rows
                     full_img(y1:y2, x1:x2, :) = block_img;
                 end
             catch
-                full_img(y1:y2, x1:x2, :) = 128;
             end
         end
     end
 end
-imshow(full_img);
-title(sprintf('image: %d/%d', sum(img_received(:)), grid_rows*grid_cols), 'FontSize', 12);
 end
 
 function draw_video_grid(video_frame_data, video_received, video_frame_count)
